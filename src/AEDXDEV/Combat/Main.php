@@ -1,260 +1,277 @@
 <?php
+declare(strict_types=1);
 
 namespace AEDXDEV\Combat;
 
+/**
+ *  A paid plugin for PocketMine-MP.
+ *	
+ *	Copyright (c) AEDXDEV
+ *  
+ *	Youtube: AEDX DEV
+ *	Discord: aedxdev
+ *	GitHub: aedxdev
+ *	Email: aedxdev@gmail.com
+ *	Donate: https://paypal.me/AEDXDEV
+ *
+ *  This plugin was sold under the AEDXDEV Publication License
+ *  
+ *  The terms of the license must be adhered to and never violated
+ *  any violation of license permissions will not be negotiated.
+ *  
+ *  You will receive the license file with the plugin
+ *  and it will also be inside the plugin.
+ *  
+ *  Since you have this plugin means that you have purchased it
+ *  and you are prohibited from using it
+ *  as a commercial product, distributing it, selling it or changing the rights
+ *  or the name of the original developer
+ *  which is AEDXDEV and it only for private use.
+ *   
+ */
+
 use pocketmine\plugin\PluginBase;
-use pocketmine\event\Listener;
-use pocketmine\event\entity\EntityDamageEvent;
-use pocketmine\event\entity\EntityDamageByEntityEvent;
-use pocketmine\event\entity\EntityDamageByChildEntityEvent;
-use pocketmine\event\player\PlayerQuitEvent;
-use pocketmine\entity\projectile\Projectile;
+use pocketmine\world\World;
+use pocketmine\world\Position;
 use pocketmine\player\Player;
-use pocketmine\scheduler\ClosureTask;
 use pocketmine\utils\Config;
+use pocketmine\network\mcpe\protocol\PlaySoundPacket;
 use pocketmine\utils\SingletonTrait;
 
-use AEDXDEV\Combat\event\CombatStartEvent;
-use AEDXDEV\Combat\event\CombatAttackEvent;
-use AEDXDEV\Combat\event\CombatEndEvent;
+use AEDXDEV\Combat\command\CombatSettingsCommand;
+use AEDXDEV\Combat\provider\Provider;
+use AEDXDEV\Combat\provider\SqlProvider;
+use AEDXDEV\Combat\provider\ConfigProvider;
+use AEDXDEV\Combat\arena\CombatArenaManager;
+use AEDXDEV\Combat\session\SessionManager;
+use AEDXDEV\Combat\session\cache\BurnCache;
+use AEDXDEV\Combat\session\cache\TntCache;
+use AEDXDEV\Combat\listener\EventListener;
+use AEDXDEV\Combat\task\CombatTask;
 
-class Main extends PluginBase implements Listener {
+use Vecnavium\FormsUI\CustomForm;
+
+use InvalidArgumentException;
+
+class Main extends PluginBase{
   
   use SingletonTrait;
   
-  // [id => [player1, player2, time, hidePlayers, penalty]]
-  private array $combat = [];
-  
-  public Config $config;
-  
-  private bool $isPluginEnabled = true;
-  private bool $sameCombat = false;
-  private bool $hidePlayers = false;
-  //private array $hideAllPlayers = [];
-  private bool $penalty = false;
-  private array $penalties = [];
-  private bool $sendMessages = true;
-  private array $messages = [];
-  private int $combatTime = 10;
-  
+  private const DEFAULT_CONFIG = [
+    "Enable" => true,
+    "UseAllowedWorldOnly" => false,
+    "BlockNonOpponents" => false,
+    "AutoActivateTnt" => true,
+    "SendMessages" => true,
+    "DeathMessages" => true,
+    "Messages" => [
+      "Start" => "§eYou are now in combat with {PLAYER}",
+      "NonOpponents" => "§cYou can only hit your current opponent.",
+      "End" => "§eYou are no longer in combat.",
+      "Kill" => "§aYou killed §f{PLAYER}§a!",
+      "Death" => "§cYou were killed by §c{PLAYER}§c!",
+      "BlockedCommand" => "§cYou cannot use this command while in combat!",
+      "SaveSettings" => "§aYour settings have been saved!"
+    ],
+    "Sounds" => [
+    	"Start" => [
+    		"name" => "random.orb",
+    		"volume" => 1.0,
+    		"pitch" => 1.0
+    	],
+    	"Kill" => [
+    		"name" => "note.pling",
+    		"volume" => 1.0,
+    		"pitch" => 1.5
+    	],
+    	"Death" => [
+    		"name" => "note.bass",
+    		"volume" => 1.0,
+    		"pitch" => 1.0
+    	],
+    	"End" => [
+    		"name" => "note.bass",
+    		"volume" => 1.0,
+    		"pitch" => 0.7
+    	],
+    	"Projectile" => [
+    		"name" => "random.orb",
+    		"volume" => 1.0,
+    		"pitch" => 1.0
+    	],
+    	"SaveSettings" => [
+    		"name" => "random.levelup",
+    		"volume" => 1.0,
+    		"pitch" => 1.0
+    	]
+    ],
+    "AllowedWorld" => [
+    	"arena"
+    ],
+    "BlockedCommands" => [
+    	"/hub",
+    	"/spawn"
+    ],
+    "KillCreditWindow" => 10.0,
+    "KillCreditTtl" => 10.0,
+    "Timer" => 10,
+		"DatabaseInfo" => [
+			"type" => "mysql",
+			"mysql" => [
+				"file" => "PlayerSettings.sql",
+				"host" => "127.0.0.1",
+				"username" => "root",
+				"password" => "",
+				"schema" => "your_schema",
+				"port" => 3306
+			],
+			"sqlite" => [
+				"file" => "PlayerSettings.sql"
+			],
+			"json" => [
+			  "file" => "PlayerSettings.json"
+			],
+			"yaml" => [
+			  "file" => "PlayerSettings.yml"
+			],
+			"worker-limit" => 1
+		]
+	];
+
+	public static bool $isPluginEnabled = true;
+
+	/** @var Provider */
+	private Provider $provider;
+	/** @var CombatArenaManager */
+	private CombatArenaManager $arenaManager;
+	/** @var SessionManager */
+	private SessionManager $sessionManager;
+	/** @var BurnCache */
+	private BurnCache $burnCache;
+	/** @var TntCache */
+	private TntCache $tntCache;
+
+	public const PREFIX = "§8[§cCOMBAT§8]";
+
+	public const FORM_PREFIX = "§l§cCOMBAT §8>§r ";
+
+	public const CMD_PREFIX = self::PREFIX . " §f>§c> §r";
+
+	public function onLoad(): void{
+		$this->arenaManager = new CombatArenaManager();
+	}
+
 	public function onEnable(): void{
-	  self::setInstance($this);
-		$this->getServer()->getPluginManager()->registerEvents($this, $this);
-		$config = new Config($this->getDataFolder() . "config.yml", Config::YAML, [
-		  "Enable" => true,
-		  "CancelIfNotInSameCombat" => false,
-		  "Penalty" => false,
-		  "HidePlayers" => false,
-		  "Penalties" => [
-		    "Health" => 5,
-		    "ItemLoss" => true
-		  ],
-		  "sendMessages" => true,
-		  "Messages" => [
-		    "Start" => "§eYou are now in combat with {PLAYER}",
-		    "InSameCombat" => "§cYou cannot proceed because you are not fighting the same opponent. Please focus on your current combat!",
-		    "End" => "§eYou are no longer in combat.",
-		    "QuitPenalty" => "§cYou have been penalized for leaving combat."
-		  ],
-		  "Time" => 10,
-		]);
-		$this->config = $config;
-	  $this->isPluginEnabled = $config->get("Enable", false);
-	  $this->sameCombat = $config->get("CancelIfNotInSameCombat", false);
-	  $this->hidePlayers = $config->get("HidePlayers", false);
-	  $this->penalty = $config->get("Penalty", false);
-	  $this->penalties = $config->get("Messages", [
-		  "Health" => 5,
-		  "ItemLoss" => true
-	  ]);
-	  $this->sendMessages = $config->get("sendMessages", false);
-	  $this->messages = $config->get("Messages", [
-	    "Start" => "§eYou are now in combat with {PLAYER}",
-	    "InSameCombat" => "§cYou cannot proceed because you are not fighting the same opponent. Please focus on your current combat!",
-	    "End" => "§eYou are no longer in combat.",
-	    "QuitPenalty" => "§cYou have been penalized for leaving combat."
-	  ]);
-	  $this->combatTime = $config->get("Time", 10);
-	  $this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function(): void{
-	    $this->handleCombatTask();
-		}), 20);
-		
+    self::setInstance($this);
+    $this->initConfig();
+    $this->registerProvider();
+		$this->sessionManager = new SessionManager();
+		$this->burnCache = new BurnCache($this->getConfig()->get("KillCreditTtl", 10.0));
+		$this->tntCache = new TntCache($this->getConfig()->get("KillCreditTtl", 10.0));
+    $this->getServer()->getCommandMap()->register("combatsettings", new CombatSettingsCommand($this));
+		$this->getServer()->getPluginManager()->registerEvents(new EventListener($this), $this);
+		$this->getScheduler()->scheduleRepeatingTask(new CombatTask(), 20);
 	}
-	
-	public function onDamage(EntityDamageEvent $event): void{
-	  if ($event instanceof EntityDamageByEntityEvent) {
-	    $damager = $event->getDamager();
-	    $entity = $event->getEntity();
-	    if (!$this->isPluginEnabled || $event->isCancelled())return;
-	    if ($event instanceof EntityDamageByChildEntityEvent) {
-	      $projectile = $event->getChild();
-	      if ($projectile !== null && !$projectile instanceof Projectile)return;
-	    }
-	    if ($damager instanceof Player && $entity instanceof Player) {
-	      if ($damager->isCreative() || $entity->isCreative())return;
-	      if($entity->getHealth() <= $event->getFinalDamage()){
-	        $this->removeCombat($entity);
-	        return;
-	      }
-	      if ($this->isInCombat($entity) || $this->isInCombat($damager)){
-	        $sameCombat = false;
-	        if ($this->getCombat($damager) === $this->getCombat($entity)) {
-      	    $combat = $this->getCombat($damager);
-      	    $combat["Time"] = $this->combatTime;
-      	    $this->combat[$this->getCombatId($damager)] = $combat;
-      	    $sameCombat = true;
-      	  }
-      	  $combatAttackEvent = new CombatAttackEvent($damager, $entity, $sameCombat);
-      	  $combatAttackEvent->call();
-      	  if ($combatAttackEvent->isCancelled() || $this->sameCombat && !$sameCombat) {
-      	    if ($this->sameCombat && $this->sendMessages) {
-      	      $damager->sendMessage($this->messages["InSameCombat"]);
-      	    }
-      	    $event->cancel();
-      	    return;
-      	  }
-	      }
-	      $this->addCombat($damager, $entity);
-	    }
-	  }
+
+	public function initConfig(): void{
+		if (!is_file($path = $this->getDataFolder() . "config.yml") || filesize($path) == 0) {
+			(new Config($path, 2, self::DEFAULT_CONFIG));
+		} else {
+		  $all = $this->getConfig()->getAll();
+			foreach (array_keys(self::DEFAULT_CONFIG) as $key) {
+				if (!isset($all[$key])) {
+					rename($path, $this->getDataFolder() . "config_old.yml");
+					(new Config($path, 2, self::DEFAULT_CONFIG));
+					break;
+				}
+			}
+		}
+		self::$isPluginEnabled = $this->getConfig()->get("Enable", false);
+		if ($this->getConfig()->get("UseAllowedWorldOnly", false)) {
+			$this->arenaManager->addCondition(fn (Player $player) => in_array($player->getWorld()->getFolderName(), $this->getConfig()->get("AllowedWorld", [])));
+		}
 	}
-  
-  public function onQuit(PlayerQuitEvent $event){
-    $player = $event->getPlayer();
-    if ($this->isInCombat($player)) {
-      if ($this->getCombat($player)["Penalty"]) {
-        $this->applyPenalty($player);
-      }
-      $this->removeCombat($player);
-    }
-  }
-  
-  private function isInCombat(Player $player): bool{
-	  foreach ($this->combat as $id => $data) {
-	    if (in_array($player->getName(), [$data["Player1"], $data["Player2"]])) {
-	      return true;
-	    }
-	  }
-    return false;
-  }
-	
-	public function addCombat(Player $player1, Player $player2): void{
-	  $event = new CombatStartEvent($player1, $player2, $this->combatTime, $this->hidePlayers);
-	  $event->setPenalty($this->penalty);
-	  $event->call();
-	  if (!$event->isCancelled()) {
-	    if ($player2->getCurrentWindow() !== null){
-  	    $player2->removeCurrentWindow();
-  	  }
-	    $this->combat[] = [
-  	    "Player1" => $player1->getName(),
-  	    "Player2" => $player2->getName(),
-  	    "Time" => $event->getTime(),
-  	    "HidePlayers" => $event->getHidePlayers(),
-  	    "Penalty" => $event->getPenalty()
-  	  ];
-  	  if ($this->hidePlayers || $event->getHidePlayers()) {
-    	  $this->handlePlayerVisibility($player1, $player2, true);
-	    }
-  	  if ($this->sendMessages) {
-  	    $msg = str_replace("{PLAYER}", "", $this->messages["Start"]);
-  	    $player1->sendMessage($msg . $player2->getName());
-  	    $player2->sendMessage($msg . $player1->getName());
-  	  }
-	  }
-  }
-  
-  private function handlePlayerVisibility(Player $player1, Player $player2, bool $hide): void {
-    foreach ([$player1, $player2] as $p) {
-      foreach ($this->getServer()->getOnlinePlayers() as $pp) {
-        if ($pp !== $player1 && $pp !== $player2) {
-          if ($hide) {
-            $p->hidePlayer($pp);
-          } else {
-            $p->showPlayer($pp);
-          }
-        } else {
-          // Ensure the combat players can see each other
-          if (!$hide) {
-            $p->showPlayer($player1);
-            $p->showPlayer($player2);
-          }
-        }
-      }
-    }
-  }
-  
-  private function applyPenalty(Player $player): void{
-    if ($this->penalties["Health"] > 0) {
-      $health = $player->getHealth() - $this->penalties["Health"];
-      if ($health < 0)return;
-      $player->setHealth($health);
-    }
-    if ($this->penalties["ItemLoss"]) {
-      $player->getInventory()->clearAll();
-    }
-    $player->sendMessage($this->messages["QuitPenalty"]);
-  }
-  
-  public function getCombat(Player $player): ?array{
-    return $this->combat[$this->getCombatId($player) ?? -1] ?? null;
-  }
-  
-  public function getCombatId(Player $player): ?int{
-    foreach ($this->combat as $id => $data) {
-	    if (in_array($player->getName(), [$data["Player1"], $data["Player2"]])) {
-	      return $id;
-	    }
-	  }
-	  return null;
-  }
-  
-  public function getPlayerCombat(Player $player): ?Player{
-    $playerName = $player->getName();
-    $target = null;
-    foreach ($this->combat as $id => $data) {
-      if ($playerName === $data["Player1"]) {
-        $target = $data["Player2"];
-      } elseif ($playerName === $data["Player2"]) {
-        $target = $data["Player1"];
-      }
-    }
-    return $target !== null ? $this->getServer()->getPlayerExact($target) : null;
-  }
-  
-  public function removeCombat(Player $player): void{
-    $name = $player->getName();
-    foreach ($this->combat as $id => $data) {
-      if (in_array($player->getName(), [$data["Player1"], $data["Player2"]])) {
-        $player1 = $this->getPlayer($data["Player1"]);
-        $player2 = $this->getPlayer($data["Player2"]);
-        $event = new CombatEndEvent($player1, $player2);
-        $event->call();
-        unset($this->combat[$id]);
-        if ($this->hidePlayers) {
-          $this->handlePlayerVisibility($player1, $player2, false);
-        }
-        if ($this->sendMessages) {
-         $player1->sendMessage($this->messages["End"]);
-         $player2->sendMessage($this->messages["End"]);
-        }
-      }
-    }
-  }
-	
-	private function handleCombatTask(): void{
-	  foreach ($this->combat as $id => $data) {
-	    if ($data["Time"] <= 0) {
-	      $this->removeCombat($this->getPlayer($data["Player1"]));
-	      //unset($this->combat[$id]);
-	    } else {
-	      $data["Time"]--;
-	      $this->combat[$id] = $data;
-	    }
-	  }
+
+	public function registerProvider(): void{
+	  $info = $this->getConfig()->get("DatabaseInfo");
+	  $class = match (strtolower($info["type"])) {
+	    "mysql" => SqlProvider::class,
+	    "sqlite" => SqlProvider::class,
+	    "json" => ConfigProvider::class,
+	    "yaml" => ConfigProvider::class,
+	    default => throw new InvalidArgumentException("Unsupported database type \"" . $info["type"] . "\". Try \"" . implode("\" or \"", ["mysql", "sqlite", "json", "yaml"]) . "\".")
+	  };
+	  $this->provider = new $class($this);
 	}
-	
-	private function getPlayer(?string $player = null): Player{
-    return $this->getServer()->getPlayerExact($player ?? "");
+
+	public function getProvider(): Provider{
+	  return $this->provider;
+	}
+
+	public function getCombatArenaManager(): CombatArenaManager{
+	  return $this->arenaManager;
+	}
+
+	public function getSessionManager(): SessionManager{
+	  return $this->sessionManager;
+	}
+
+	public function getBurnCache(): BurnCache{
+		return $this->burnCache;
+	}
+
+	public function getTntCache(): TntCache{
+		return $this->tntCache;
+	}
+
+	public function onDisable(): void{
+	  $this->sessionManager?->close();
+	  $this->provider?->close();
+	}
+
+	public function CombatSettingsForm(Player $player): void{
+	  if (($session = $this->sessionManager->get($player)) == null) {
+      $player->sendMessage(self::CMD_PREFIX . "§c[Error 404] Session not found.");
+      return;
+    }
+	  $form = new CustomForm(function(Player $player, ?array $data) use ($session): void{
+	    if ($data === null) return;
+	    $session->setCpsPopup((bool)$data[0]);
+	    $session->setCpsDisplay((bool)$data[1]);
+	    $session->setCombatSounds((bool)$data[2]);
+	    $session->setProjectilesSound((bool)$data[3]);
+	    $session->setHideNonOpponents((bool)$data[4]);
+	    $session->setSendMessages((bool)$data[5]);
+	    $session->setHealthType((int)$data[6]);
+	    $player->sendMessage(self::CMD_PREFIX . $this->getConfig()->getNested("Messages.SaveSettings"));
+	    $this->playSound($player, "SaveSettings");
+	  });
+	  $form->setTitle(self::FORM_PREFIX . "§6Settings");
+	  $form->addToggle("Show Cps Popup", $session->isCpsPopup());
+	  $form->addToggle("Cps Nametag", $session->isCpsDisplay());
+	  $form->addToggle("Combat Sounds", $session->isCombatSounds());
+	  $form->addToggle("Projectiles Sound", $session->isProjectilesSound());
+	  $form->addToggle("Hide Non-opponents", $session->isHideNonOpponents());
+	  $form->addToggle("Send Combat Messages", $session->isSendMessages());
+	  $form->addStepSlider("Health Type", ["None", "Number", "Bar"], $session->getHealthType());
+	  $player->sendForm($form);
+	}
+
+	public function getMessage(string $key, array $replace = []): string{
+    $message = $this->getConfig()->getNested("Messages.{$key}", "");
+    empty($message) ? ($message = "§cMessage Not Found!") : null;
+    foreach ($replace as $k => $v) {
+    	$message = str_replace(("{" . strtoupper($k) . "}"), $v, $message);
+    }
+    return $message;
+  }
+
+  public function playSound(?Player $player, string $sound): void{
+  	if (!$player instanceof Player)return;
+    $pos = $player->getPosition();
+    $data = $this->getConfig()->getNested("Sounds.{$sound}", null);
+    if ($data == null || empty($data["name"] ?? ""))return;
+    $pk = PlaySoundPacket::create($data["name"], $pos->getX(), $pos->getY(), $pos->getZ(), ($data["volume"] ?? 1), ($data["pitch"] ?? 1));
+    $player->getNetworkSession()->sendDataPacket($pk);
   }
 }
