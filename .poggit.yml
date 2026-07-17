@@ -1,9 +1,9 @@
---- # Poggit-CI Manifest. Open the CI at https://poggit.pmmp.io/ci/AEDXDEV/Combat
+--- # Poggit-CI Manifest. Open the CI at https://poggit.pmmp.io/ci/AEDXDEV/AdvancedCombat
 build-by-default: true
 branches:
 - main
 projects:
-  Combat:
+  AdvancedCombat:
     path: ""
     icon: "icon.png"
 ...
