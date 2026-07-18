@@ -169,8 +169,8 @@ DatabaseInfo: # Database configuration for saving player settings.
 |---|---|
 | Discord | `aedxdev` |
 | YouTube | [AEDX DEV](https://youtube.com/@aedxdev?si=RG-8HrkGhFy4kbHI) |
-| GitHub | [aedxdev](https://github.com/aedxdev) |
+| GitHub | [AEDXDEV](https://github.com/AEDXDEV) |
 | Email | aedxdev@gmail.com |
-| Donate | [paypal.me/AEDXDEV](https://paypal.me/AEDXDEV) |
+| Donate | [paypal.me/AEDXYD](https://paypal.me/AEDXYD) |
 
 ---
